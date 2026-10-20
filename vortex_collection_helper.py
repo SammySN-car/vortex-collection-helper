@@ -718,7 +718,16 @@ def main():
 
     bridge = VortexBridge(args.port)
     bridge.connect()
-    log("vortex: hooked openUrl -> %s" % bridge.ensure_hook())
+    # A Vortex that was just launched has not exposed its renderer API yet.
+    # Retrying here keeps the hook honest instead of quietly relying on the
+    # per-mod retry and logging "no-api" at startup.
+    hook = bridge.ensure_hook()
+    for _ in range(20):
+        if hook != "no-api":
+            break
+        time.sleep(1)
+        hook = bridge.ensure_hook()
+    log("vortex: hooked openUrl -> %s" % hook)
 
     browser = BrowserSide(args.profile, args.channel)
     log("browser: profile %s" % args.profile)

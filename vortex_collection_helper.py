@@ -391,6 +391,7 @@ class BrowserSide:
             return None
 
     def ensure_login(self, log):
+        self._revive(log)
         self.page.goto("https://www.nexusmods.com/users/myaccount",
                        wait_until="domcontentloaded")
         # The redirect to the sign-in page happens after domcontentloaded, so
@@ -407,6 +408,20 @@ class BrowserSide:
             log("  You only have to do this once per profile; solve any captcha normally.")
             log("  The script carries on by itself the moment you are in.")
             while self._login_state() is not True:
+                try:
+                    gone = self.page is None or self.page.is_closed()
+                except Exception:
+                    gone = True
+                if gone:
+                    # Somebody closed the window. Waiting here would be waiting
+                    # for a login that can no longer happen - reopen instead.
+                    log("  the browser window went away - reopening it")
+                    self._revive(log)
+                    try:
+                        self.page.goto("https://www.nexusmods.com/users/myaccount",
+                                       wait_until="domcontentloaded")
+                    except Exception:
+                        pass
                 time.sleep(3)
         elif state is None:
             log("  could not tell whether you are logged in - check the browser window")

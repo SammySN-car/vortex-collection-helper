@@ -776,6 +776,8 @@ def main():
                         what = bridge.click_skip_mod()
                         log("  %s" % ("pressed 'Skip mod'" if what == "clicked"
                                       else "could not press 'Skip mod'"))
+                        if what == "clicked":
+                            skipped += 1
                         time.sleep(2)
                         continue
                     log("  cannot get Vortex past %d/%d - taking it again" % key)

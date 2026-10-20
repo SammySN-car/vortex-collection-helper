@@ -140,3 +140,7 @@ Re-run these after a Vortex update to confirm the moving parts still line up.
 python dev\check_vortex_bridge.py    # attach, hook, read prompt, restore hook
 python dev\check_browser.py          # launch browser, navigate, recycle, close
 ```
+
+## License
+
+MIT - see [LICENSE](LICENSE).

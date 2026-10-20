@@ -602,33 +602,42 @@ def mod_key(url):
     return None
 
 
-def log_size():
+def log_mark():
+    """(bytes, created) for vortex.log - enough to notice a rewrite.
+
+    Size catches truncation. Creation time catches replacement by a fresh
+    file, which may well be larger than the offset we saved from the old one.
+    """
     try:
-        return os.path.getsize(VORTEX_LOG)
+        st = os.stat(VORTEX_LOG)
+        return (st.st_size, st.st_ctime)
     except OSError:
-        return 0
+        return (0, 0.0)
 
 
-def saw_handoff(offset, key):
-    """True once Vortex's log shows it received this mod+file since `offset`.
+def saw_handoff(mark, key):
+    """True once Vortex's log shows it received this mod+file since `mark`.
 
     A browser handoff always lands in vortex.log as
         [RENDERER] handling url {"url":"nxm://.../mods/<id>/files/<fid>?key=..."}
     Unlike the dialog counter, that cannot flicker: the download is real.
+
+    Vortex rewrites vortex.log when it reaches ~5 MB. If the file shrank or
+    was replaced since `mark` was taken, the mark is meaningless and the whole
+    file is searched - otherwise the run would sit out the download timeout.
     """
     if not key:
         return False
-    # Vortex truncates vortex.log in place when it reaches ~5 MB. Once that
-    # happens our saved offset points past the end of file and nothing would
-    # ever match again - the run then sits out the full download timeout.
+    size, created = mark
     try:
-        if os.path.getsize(VORTEX_LOG) < offset:
-            offset = 0
+        st = os.stat(VORTEX_LOG)
     except OSError:
         return False
+    if st.st_ctime != created or st.st_size < size:
+        size = 0
     try:
         with open(VORTEX_LOG, "rb") as fh:
-            fh.seek(offset)
+            fh.seek(size)
             chunk = fh.read().decode("utf-8", "replace")
     except OSError:
         return False
@@ -636,9 +645,9 @@ def saw_handoff(offset, key):
     return any("handling url" in line and want in line for line in chunk.splitlines())
 
 
-def wait_handoff(offset, key, seconds, log):
+def wait_handoff(mark, key, seconds, log):
     for _ in range(max(1, seconds // 3)):
-        if saw_handoff(offset, key):
+        if saw_handoff(mark, key):
             log("  Vortex received the download")
             return True
         time.sleep(3)
@@ -765,7 +774,7 @@ def main():
                     continue
 
                 key = mod_key(url)
-                log_off = log_size()
+                log_off = log_mark()
                 if key and key in done_keys:
                     # This exact mod+file was already downloaded during this run.
                     # Vortex asked again because its counter repeated - taking it

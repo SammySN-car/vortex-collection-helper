@@ -106,6 +106,154 @@ def find_vortex_exe():
     return None
 
 
+# --------------------------------------------------------------------------
+# Optional: park the browser and Vortex on a virtual desktop of their own
+# --------------------------------------------------------------------------
+#
+# Windows has no documented API for creating a virtual desktop, so this rides
+# on the undocumented IVirtualDesktopManagerInternal through `pyvda`. Every
+# call is best effort: if Windows changes that interface, the run continues
+# with the windows visible instead of failing.
+
+_PARK = {"enabled": False, "desktop": None, "warned": False, "labels": set()}
+
+
+def _visible_windows():
+    """[(hwnd, pid)] for every visible top-level window."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    found = []
+
+    def visit(hwnd, _param):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if user32.IsWindowVisible(hwnd):
+            found.append((hwnd, pid.value))
+        return True
+
+    user32.EnumWindows(callback(visit), 0)
+    return found
+
+
+def _cmdlines():
+    """{pid: lowercased command line} for the visible windows."""
+    cache = {}
+    for _hwnd, pid in _visible_windows():
+        if pid in cache:
+            continue
+        try:
+            import psutil
+            cache[pid] = " ".join(psutil.Process(pid).cmdline()).lower()
+        except Exception:
+            cache[pid] = ""
+    return cache
+
+
+def _find_own_windows(profile, wait=5.0):
+    """(browser hwnds, Vortex hwnds) that belong to this run.
+
+    The browser is recognised by our private profile path in its command
+    line, so the user's own Edge windows are never touched. Vortex is
+    recognised by the debug port the helper made it start with.
+    """
+    want = os.path.normcase(os.path.abspath(profile)) if profile else ""
+    deadline = time.time() + wait
+    while True:
+        lines = _cmdlines()
+        browsers, vortex = [], []
+        for hwnd, pid in _visible_windows():
+            cmd = lines.get(pid, "")
+            if not cmd:
+                continue
+            if want and want in os.path.normcase(cmd):
+                browsers.append(hwnd)
+            elif "vortex.exe" in cmd and "--remote-debugging-port" in cmd:
+                vortex.append(hwnd)
+        if browsers or vortex or time.time() > deadline:
+            return browsers, vortex
+        time.sleep(0.5)
+
+
+def park_windows(profile, log):
+    """Move this run's windows to their own virtual desktop."""
+    if not _PARK["enabled"]:
+        return
+    try:
+        import pyvda  # noqa: F401
+        import psutil  # noqa: F401  (used by _cmdlines)
+        from pyvda import AppView, VirtualDesktop
+    except Exception:
+        if not _PARK["warned"]:
+            _PARK["warned"] = True
+            log("desktop: needs pyvda and psutil (pip install pyvda psutil)"
+                " - windows stay visible")
+        return
+    try:
+        browsers, vortex = _find_own_windows(profile)
+        if not browsers and not vortex:
+            # Nothing to move yet. Creating a desktop now would leak an empty
+            # one, so leave the windows where they are and try again later.
+            log("desktop: no windows found yet - leaving them visible")
+            return
+        if _PARK["desktop"] is None:
+            _PARK["desktop"] = VirtualDesktop.create()
+        target = _PARK["desktop"]
+        for label, handles in (("browser", browsers), ("Vortex", vortex)):
+            for hwnd in handles:
+                try:
+                    AppView(hwnd).move(target)
+                    _PARK["labels"].add(label)
+                except Exception as exc:
+                    log("desktop: could not move the %s window (%s)" % (label, exc))
+        if _PARK["labels"]:
+            log("desktop: %s on virtual desktop %d - you stay on yours"
+                % (" and ".join(sorted(_PARK["labels"])), target.number))
+    except Exception as exc:
+        _PARK["enabled"] = False
+        _PARK["warned"] = True
+        log("desktop: unavailable (%s) - continuing with windows visible" % exc)
+
+
+def unpark_windows(log):
+    """Bring Vortex back to your desktop, then drop the scratch one if empty."""
+    if not _PARK["enabled"] or _PARK["desktop"] is None:
+        return
+    try:
+        import pyvda
+        from pyvda import AppView, VirtualDesktop
+    except Exception:
+        return
+    try:
+        here = VirtualDesktop.current()
+        _browsers, vortex = _find_own_windows("", wait=0)
+        for hwnd in vortex:
+            try:
+                AppView(hwnd).move(here)
+            except Exception:
+                pass
+        time.sleep(0.5)
+        target = _PARK["desktop"]
+        left = 0
+        for hwnd, _pid in _visible_windows():
+            try:
+                if AppView(hwnd).desktop.number == target.number:
+                    left += 1
+            except Exception:
+                pass
+        if left:
+            log("desktop: %d window(s) left on virtual desktop %d"
+                % (left, target.number))
+        else:
+            target.remove()
+            log("desktop: removed the virtual desktop")
+    except Exception as exc:
+        log("desktop: cleanup skipped (%s)" % exc)
+    finally:
+        _PARK["desktop"] = None
+
+
 JS_HOOK = r"""
 (() => {
   if (window.__vch_installed) return "already";
@@ -368,6 +516,7 @@ class BrowserSide:
         time.sleep(2)
         self.start()
         say("browser: restarted")
+        park_windows(self.profile, say)
 
     def _login_state(self):
         """True = signed in, False = signed out, None = undecided.
@@ -668,6 +817,9 @@ def main():
                     default=os.path.join(os.environ.get("LOCALAPPDATA", here),
                                          "vortex-collection-helper", "profile"))
     ap.add_argument("--channel", default="msedge", help="msedge (default) or chromium")
+    ap.add_argument("--desktop", action="store_true",
+                    help="park the browser and Vortex on a separate virtual "
+                         "desktop (needs pyvda; best effort)")
     ap.add_argument("--recycle-every", type=int, default=3,
                     help="close and reopen the browser tab every N downloads")
     ap.add_argument("--idle-exit", type=int, default=180,
@@ -680,6 +832,7 @@ def main():
     ap.add_argument("--restart-vortex", action="store_true",
                     help="if Vortex is running without the debug port, kill and relaunch it")
     args = ap.parse_args()
+    _PARK["enabled"] = args.desktop
 
     log = make_logger(os.path.join(here, "vortex_collection_helper.log"))
     log("=" * 68)
@@ -743,6 +896,7 @@ def main():
 
     try:
         browser.ensure_login(log)
+        park_windows(args.profile, log)
 
         name = "(unknown mod)"
         idx = None
@@ -948,6 +1102,7 @@ def main():
             pass
         browser.close()
         log("browser closed")
+        unpark_windows(log)
 
     return 0
 

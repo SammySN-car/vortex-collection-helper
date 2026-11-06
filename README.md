@@ -36,6 +36,7 @@ This script does the round trips for you.
   or pass `--vortex-exe`.
 - `pip install websocket-client playwright`
 - A one-time Nexus login in the browser profile the script uses.
+- For `--desktop` only: `pip install pyvda psutil`.
 
 ## Run
 
@@ -43,6 +44,7 @@ This script does the round trips for you.
 python vortex_collection_helper.py --once              # test: one mod, then stop
 python vortex_collection_helper.py                    # interactive on failure
 python vortex_collection_helper.py --on-failure skip   # fully unattended
+python vortex_collection_helper.py --desktop         # windows out of sight
 python vortex_collection_helper.py --help
 ```
 
@@ -64,6 +66,33 @@ python vortex_collection_helper.py --profile "%LOCALAPPDATA%\ms-playwright-mcp\m
   for anything else either. The hook is restored on exit, including Ctrl+C.
 - Everything is logged to `vortex_collection_helper.log` beside the script.
   That log contains live download keys - **do not commit or share it**.
+
+## Keeping it out of your way (`--desktop`)
+
+Your `Slow download` click makes Windows hand `nxm://` to Vortex, and Vortex
+raises its own window. The browser window is open too. `--desktop` moves both
+to a virtual desktop of their own:
+
+1. it creates a desktop and moves the browser window there - matched by
+   `--user-data-dir` in its command line, so your own Edge windows are never
+   touched - and Vortex's main window with it;
+2. it never switches you: `VirtualDesktop.create()` does not change the current
+   desktop on the tested build, so you stay where you are and only see taskbar
+   flashes;
+3. at exit it moves Vortex back to whatever desktop you are on, and removes the
+   scratch desktop if nothing is left on it;
+4. if the browser has to be restarted mid-run, the new window is parked again.
+
+This is best effort by design. It rides on `IVirtualDesktopManagerInternal`,
+which Microsoft has never documented and changes between Windows builds. If
+the API is missing or the build is unsupported, the helper logs one line and
+continues with the windows visible - it never fails a run. It also refuses to
+create a desktop when it cannot find the windows, so no empty desktop is left
+behind.
+
+```
+python vortex_collection_helper.py --desktop
+```
 
 ## Failure modes it handles
 
@@ -131,6 +160,8 @@ Checked against the live app:
 - Browser launch / navigate / recycle / close verified.
 - Handoff detection verified against a real `vortex.log`: all URL forms parsed,
   matching key found, unrelated keys rejected, truncation recovery tested.
+- Virtual-desktop parking verified end to end on Windows `26H2` build
+  `26300.9818`: create, cross-desktop move, stay put, return, remove.
 
 ## dev/
 
@@ -139,6 +170,7 @@ Re-run these after a Vortex update to confirm the moving parts still line up.
 ```
 python dev\check_vortex_bridge.py    # attach, hook, read prompt, restore hook
 python dev\check_browser.py          # launch browser, navigate, recycle, close
+python dev\check_desktop.py          # park the browser on its own virtual desktop
 ```
 
 ## License

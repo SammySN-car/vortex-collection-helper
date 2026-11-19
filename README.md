@@ -175,4 +175,4 @@ python dev\check_desktop.py          # park the browser on its own virtual deskt
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+This section specifies the licensing terms for the project. The code indicates that the project is licensed under the MIT license. Full details are provided in the LICENSE file.
